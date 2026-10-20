@@ -119,3 +119,30 @@ fn the_menu_and_the_v_key_hide_and_show_picked_joints() {
     context_menu::toggle_visibility(&mut h.app);
     assert!(h.app.session.joint_visible(hinge) && h.app.session.joint_visible(glue));
 }
+
+/// #3579: the Delete key deletes the joints picked in the browser, as their menu's Delete does,
+/// and all of them in one undo step.
+#[test]
+fn the_delete_key_deletes_picked_joints() {
+    let mut h = harness();
+    let (hinge, glue) = (id(&h, "Hinge"), id(&h, "Glue"));
+    let ids = |h: &Harness| h.app.session.doc.assembly.joints.iter().map(|j| j.id).collect::<Vec<_>>();
+    click(&mut h, "row:Hinge");
+    assert_eq!(h.app.tree.picked_joints, [hinge]);
+    h.step(&json!({"key": "Delete"})).unwrap();
+    h.settle();
+    assert_eq!(ids(&h), [glue]);
+    assert!(h.app.tree.picked_joints.is_empty(), "the pick goes with the joint");
+
+    h.app.run("edit.undo", json!({})).unwrap();
+    h.frames(3);
+    click(&mut h, "row:Hinge");
+    // Ctrl+click on Glue's row.
+    crate::dialogs_assembly::pick_joint(&mut h.app, glue, true);
+    assert_eq!(h.app.tree.picked_joints, [hinge, glue]);
+    h.step(&json!({"key": "Backspace"})).unwrap();
+    h.settle();
+    assert!(ids(&h).is_empty());
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert_eq!(ids(&h), [hinge, glue], "one undo brings both back");
+}

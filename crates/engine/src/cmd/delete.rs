@@ -1,7 +1,7 @@
 //! Delete for everything that can be selected, in one undo step: sketch entities (while
 //! sketching), timeline features and sketches (with the features that depend on them),
 //! construction planes, bodies (a Remove feature from here on in the timeline), occurrences and
-//! components, and canvases. `dry_run` reports what would go and what would fail without
+//! components, assembly joints, and canvases. `dry_run` reports what would go and what would fail without
 //! changing anything, so the UI can ask first.
 
 use serde_json::{Value, json};
@@ -13,7 +13,7 @@ use crate::params::{bad, bool_};
 use crate::{EngineError, Result, Sel, Session};
 
 pub static COMMANDS: &[CommandSpec] = &[CommandSpec::new("selection.delete", "Delete", delete).icon("delete").params(
-    "items?: [selection items]; components?, occurrences?, canvases?: [ids or names]; dry_run?: bool → deleted, would_fail, skipped (one undo step)",
+    "items?: [selection items]; components?, occurrences?, joints?, canvases?: [ids or names]; dry_run?: bool → deleted, would_fail, skipped (one undo step)",
 )];
 
 /// Run another command's body inside this one (so the whole delete is one undo step).
@@ -94,6 +94,13 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     }
     features.dedup();
     let mut done = false;
+    // Joints first: a component deleted below may take a joint with it.
+    let mut joints = keys(p, "joints");
+    joints.dedup();
+    for k in joints {
+        sub(s, "joint.delete", json!({ "joint": k }))?;
+        done = true;
+    }
     if !entities.is_empty() {
         if s.active_sketch.is_none() {
             skip("sketch entities are deleted while editing their sketch".into());
@@ -273,5 +280,37 @@ mod tests {
         let id = s.model.state().sketch(sk).unwrap().sketch.curves[0].id.clone();
         run(&mut s, "selection.delete", json!({"items": [{"type": "sketch_curve", "id": id}]}));
         assert!(s.model.state().sketch(sk).unwrap().sketch.curves.is_empty());
+    }
+
+    /// #3579: joints picked in the browser go with the rest of the selection, in one undo step.
+    #[test]
+    fn joints_go_with_the_selection_in_one_undo_step() {
+        let mut s = Session::default();
+        for (name, x) in [("A", 0), ("B", 30), ("C", 60)] {
+            run(&mut s, "component.activate", json!({"component": "root"}));
+            run(&mut s, "component.create", json!({ "name": name }));
+            run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 10, "corner": [x, 0, 0]}));
+        }
+        run(&mut s, "component.activate", json!({"component": "root"}));
+        run(&mut s, "construct.plane.offset", json!({"base": "XY", "offset": 30}));
+        let joint = |s: &mut Session, name: &str, b: &str, x: f64| {
+            let p =
+                json!({"type": "rigid", "name": name, "a": {"occurrence": "A:1", "face": [10, 10, 10]}, "b": {"occurrence": b, "face": [x, 10, 0]}});
+            run(s, "joint.create", p)["joint"].as_u64().unwrap()
+        };
+        let hinge = joint(&mut s, "Hinge", "B:1", 40.0);
+        let glue = joint(&mut s, "Glue", "C:1", 70.0);
+        let depth = s.undo.len();
+        let dry = run(&mut s, "selection.delete", json!({"joints": [hinge], "dry_run": true}));
+        assert_eq!(s.doc.assembly.joints.len(), 2, "a dry run changes nothing: {dry}");
+        run(&mut s, "selection.delete", json!({"items": [{"type": "plane", "name": "Plane1"}], "joints": [hinge, "Glue"]}));
+        assert!(s.doc.assembly.joints.is_empty());
+        assert!(s.doc.find_feature("Plane1").is_none());
+        assert_eq!(s.undo.len(), depth + 1);
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(s.doc.assembly.joints.iter().map(|j| j.id).collect::<Vec<_>>(), [hinge, glue]);
+        assert!(s.doc.find_feature("Plane1").is_some());
+        assert!(s.execute("selection.delete", &json!({"joints": ["nope"]})).is_err());
+        assert_eq!(s.doc.assembly.joints.len(), 2, "a joint that isn't there changes nothing");
     }
 }
